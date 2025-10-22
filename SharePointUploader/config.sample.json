@@ -1,0 +1,10 @@
+{
+  "SharePoint": {
+    "SiteUrl": "https://yourtenant.sharepoint.com/sites/yoursite",
+    "LibraryName": "Documents",
+    "FolderPath": "Shared Documents/UploadFolder",
+    "TenantId": "your-tenant-id",
+    "ClientId": "your-client-id",
+    "ClientSecret": "your-client-secret"
+  }
+}
