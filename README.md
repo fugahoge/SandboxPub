@@ -154,6 +154,8 @@ SharePoint Online ファイルアップローダー
 
 ## 使用しているライブラリ
 
-- [PnP.Framework](https://github.com/pnp/pnpframework) - SharePoint接続とファイル操作
-- [Microsoft.Identity.Client](https://github.com/AzureAD/microsoft-authentication-library-for-dotnet) - Azure AD認証
+- [Microsoft.Graph](https://github.com/microsoftgraph/msgraph-sdk-dotnet) - Microsoft Graph API経由でSharePointにアクセス
+- [Azure.Identity](https://github.com/Azure/azure-sdk-for-net/tree/main/sdk/identity/Azure.Identity) - Azure AD認証
 - [Microsoft.Extensions.Configuration](https://github.com/dotnet/runtime) - 設定ファイル読み込み
+
+すべてMicrosoft公式のライブラリを使用しています。

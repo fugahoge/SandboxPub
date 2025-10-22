@@ -1,19 +1,22 @@
-using Microsoft.SharePoint.Client;
-using PnP.Framework;
+using Microsoft.Graph;
+using Microsoft.Graph.Models;
+using Azure.Identity;
 
 namespace SharePointUploader;
 
 /// <summary>
-/// SharePoint Onlineへのファイルアップロードサービス
+/// SharePoint Onlineへのファイルアップロードサービス (Microsoft Graph API使用)
 /// </summary>
 public class SharePointUploadService
 {
     private readonly SharePointConfig _config;
+    private readonly GraphServiceClient _graphClient;
 
     public SharePointUploadService(SharePointConfig config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         ValidateConfig();
+        _graphClient = CreateGraphClient();
     }
 
     /// <summary>
@@ -38,6 +41,21 @@ public class SharePointUploadService
     }
 
     /// <summary>
+    /// Graph APIクライアントを作成
+    /// </summary>
+    private GraphServiceClient CreateGraphClient()
+    {
+        var credential = new ClientSecretCredential(
+            _config.TenantId,
+            _config.ClientId,
+            _config.ClientSecret);
+
+        var scopes = new[] { "https://graph.microsoft.com/.default" };
+
+        return new GraphServiceClient(credential, scopes);
+    }
+
+    /// <summary>
     /// ファイルをSharePoint Onlineにアップロード
     /// </summary>
     /// <param name="filePath">アップロードするファイルのパス</param>
@@ -52,46 +70,111 @@ public class SharePointUploadService
 
         try
         {
-            Console.WriteLine($"ファイルをアップロード中: {Path.GetFileName(filePath)}");
+            var fileName = Path.GetFileName(filePath);
+            Console.WriteLine($"ファイルをアップロード中: {fileName}");
             Console.WriteLine($"アップロード先: {_config.SiteUrl}/{_config.FolderPath}");
 
-            // 認証マネージャーを使用してClientContextを取得
-            var authManager = new AuthenticationManager(
-                _config.ClientId,
-                _config.ClientSecret,
-                _config.TenantId);
+            // SharePointサイトのホスト名とサイトパスを取得
+            var siteInfo = ParseSiteUrl(_config.SiteUrl);
 
-            using (var context = await authManager.GetContextAsync(_config.SiteUrl))
-            {
-                var web = context.Web;
-                context.Load(web);
-                await context.ExecuteQueryAsync();
-
-                // ファイル情報を取得
-                var fileName = Path.GetFileName(filePath);
-                var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
-
-                // フォルダパスを正規化
-                var targetFolderUrl = _config.FolderPath.TrimStart('/');
-
-                // ターゲットフォルダを取得または作成
-                var folder = await EnsureFolderAsync(context, web, targetFolderUrl);
-
-                // ファイルをアップロード
-                var fileCreationInfo = new FileCreationInformation
+            // サイトIDを取得
+            var site = await _graphClient.Sites[siteInfo.hostName]
+                .GetAsync(requestConfig =>
                 {
-                    Content = fileBytes,
-                    Url = fileName,
-                    Overwrite = true
-                };
+                    requestConfig.QueryParameters.Select = new[] { "id", "webUrl" };
+                });
 
-                var uploadFile = folder.Files.Add(fileCreationInfo);
-                context.Load(uploadFile);
-                await context.ExecuteQueryAsync();
+            if (site == null || string.IsNullOrEmpty(site.Id))
+            {
+                // サイトパスが指定されている場合（例: /sites/sitename）
+                if (!string.IsNullOrEmpty(siteInfo.sitePath))
+                {
+                    site = await _graphClient.Sites
+                        .GetByPath(siteInfo.sitePath, siteInfo.hostName)
+                        .GetAsync();
+                }
 
+                if (site == null || string.IsNullOrEmpty(site.Id))
+                {
+                    Console.WriteLine($"エラー: SharePointサイトが見つかりません: {_config.SiteUrl}");
+                    return false;
+                }
+            }
+
+            Console.WriteLine($"  サイトID: {site.Id}");
+
+            // ドライブ（ドキュメントライブラリ）を取得
+            var drive = await GetDriveAsync(site.Id, _config.LibraryName);
+            if (drive == null)
+            {
+                Console.WriteLine($"エラー: ドキュメントライブラリが見つかりません: {_config.LibraryName}");
+                return false;
+            }
+
+            Console.WriteLine($"  ドライブID: {drive.Id}");
+
+            // フォルダパスを正規化
+            var targetFolderPath = _config.FolderPath.Trim('/');
+
+            // フォルダが存在することを確認（存在しない場合は作成）
+            var folderId = await EnsureFolderAsync(drive.Id!, targetFolderPath);
+
+            // ファイルを読み込み
+            using var fileStream = System.IO.File.OpenRead(filePath);
+            var fileSize = new FileInfo(filePath).Length;
+
+            // ファイルをアップロード
+            DriveItem? uploadedItem;
+
+            if (fileSize < 4 * 1024 * 1024) // 4MB未満は通常アップロード
+            {
+                uploadedItem = await _graphClient.Drives[drive.Id]
+                    .Items[folderId]
+                    .ItemWithPath(fileName)
+                    .Content
+                    .PutAsync(fileStream);
+            }
+            else // 4MB以上は大容量アップロード
+            {
+                var uploadSession = await _graphClient.Drives[drive.Id]
+                    .Items[folderId]
+                    .ItemWithPath(fileName)
+                    .CreateUploadSession
+                    .PostAsync(new Microsoft.Graph.Drives.Item.Items.Item.CreateUploadSession.CreateUploadSessionPostRequestBody
+                    {
+                        Item = new DriveItemUploadableProperties
+                        {
+                            AdditionalData = new Dictionary<string, object>
+                            {
+                                { "@microsoft.graph.conflictBehavior", "replace" }
+                            }
+                        }
+                    });
+
+                if (uploadSession?.UploadUrl == null)
+                {
+                    Console.WriteLine("エラー: アップロードセッションの作成に失敗しました");
+                    return false;
+                }
+
+                // 大容量ファイルのアップロード（チャンク単位）
+                var maxChunkSize = 320 * 1024 * 10; // 3.2MB
+                var provider = new ChunkedUploadProvider(uploadSession, _graphClient, fileStream, maxChunkSize);
+                var uploadResult = await provider.UploadAsync();
+
+                uploadedItem = uploadResult.ItemResponse;
+            }
+
+            if (uploadedItem != null)
+            {
                 Console.WriteLine($"✓ アップロード成功: {fileName}");
-                Console.WriteLine($"  サイズ: {FormatFileSize(fileBytes.Length)}");
+                Console.WriteLine($"  サイズ: {FormatFileSize(fileSize)}");
                 return true;
+            }
+            else
+            {
+                Console.WriteLine("エラー: アップロードに失敗しました");
+                return false;
             }
         }
         catch (Exception ex)
@@ -109,38 +192,126 @@ public class SharePointUploadService
     }
 
     /// <summary>
+    /// サイトURLを解析してホスト名とサイトパスを取得
+    /// </summary>
+    private (string hostName, string sitePath) ParseSiteUrl(string siteUrl)
+    {
+        var uri = new Uri(siteUrl);
+        var hostName = uri.Host;
+        var sitePath = uri.AbsolutePath;
+
+        return (hostName, sitePath);
+    }
+
+    /// <summary>
+    /// ドライブ（ドキュメントライブラリ）を取得
+    /// </summary>
+    private async Task<Drive?> GetDriveAsync(string siteId, string libraryName)
+    {
+        var drives = await _graphClient.Sites[siteId].Drives.GetAsync();
+
+        if (drives?.Value == null)
+        {
+            return null;
+        }
+
+        // ライブラリ名で検索（Documentsの場合はデフォルトドライブを返す）
+        var drive = drives.Value.FirstOrDefault(d =>
+            d.Name?.Equals(libraryName, StringComparison.OrdinalIgnoreCase) == true);
+
+        // 見つからない場合はデフォルトドライブを使用
+        if (drive == null && libraryName.Equals("Documents", StringComparison.OrdinalIgnoreCase))
+        {
+            drive = await _graphClient.Sites[siteId].Drive.GetAsync();
+        }
+
+        return drive;
+    }
+
+    /// <summary>
     /// フォルダが存在することを確認し、存在しない場合は作成
     /// </summary>
-    private async Task<Folder> EnsureFolderAsync(ClientContext context, Web web, string folderPath)
+    private async Task<string> EnsureFolderAsync(string driveId, string folderPath)
     {
         var folders = folderPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-        var currentFolder = web.RootFolder;
-        context.Load(currentFolder);
-        await context.ExecuteQueryAsync();
+        var currentParentId = "root";
 
         foreach (var folderName in folders)
         {
-            var folderCollection = currentFolder.Folders;
-            context.Load(folderCollection);
-            await context.ExecuteQueryAsync();
-
-            var existingFolder = folderCollection.FirstOrDefault(f =>
-                f.Name.Equals(folderName, StringComparison.OrdinalIgnoreCase));
-
-            if (existingFolder != null)
+            try
             {
-                currentFolder = existingFolder;
+                // フォルダが存在するか確認
+                var existingFolder = await _graphClient.Drives[driveId]
+                    .Items[currentParentId]
+                    .ItemWithPath(folderName)
+                    .GetAsync();
+
+                if (existingFolder?.Id != null)
+                {
+                    currentParentId = existingFolder.Id;
+                    continue;
+                }
             }
-            else
+            catch
             {
-                currentFolder = folderCollection.Add(folderName);
-                context.Load(currentFolder);
-                await context.ExecuteQueryAsync();
-                Console.WriteLine($"  フォルダを作成しました: {folderName}");
+                // フォルダが存在しない場合は作成
+            }
+
+            // フォルダを作成
+            var newFolder = new DriveItem
+            {
+                Name = folderName,
+                Folder = new Folder(),
+                AdditionalData = new Dictionary<string, object>
+                {
+                    { "@microsoft.graph.conflictBehavior", "fail" }
+                }
+            };
+
+            try
+            {
+                var createdFolder = await _graphClient.Drives[driveId]
+                    .Items[currentParentId]
+                    .Children
+                    .PostAsync(newFolder);
+
+                if (createdFolder?.Id != null)
+                {
+                    Console.WriteLine($"  フォルダを作成しました: {folderName}");
+                    currentParentId = createdFolder.Id;
+                }
+                else
+                {
+                    throw new InvalidOperationException($"フォルダの作成に失敗しました: {folderName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                // 既に存在する場合は無視して取得
+                if (ex.Message.Contains("nameAlreadyExists") || ex.Message.Contains("resourceAlreadyExists"))
+                {
+                    var existingFolder = await _graphClient.Drives[driveId]
+                        .Items[currentParentId]
+                        .ItemWithPath(folderName)
+                        .GetAsync();
+
+                    if (existingFolder?.Id != null)
+                    {
+                        currentParentId = existingFolder.Id;
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+                else
+                {
+                    throw;
+                }
             }
         }
 
-        return currentFolder;
+        return currentParentId;
     }
 
     /// <summary>
