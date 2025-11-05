@@ -1,6 +1,7 @@
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
 using Azure.Identity;
+using System.Security.Cryptography.X509Certificates;
 
 namespace SharePointUploader;
 
@@ -33,8 +34,17 @@ public class SharePointUploadService
         if (string.IsNullOrWhiteSpace(_config.ClientId))
             throw new InvalidOperationException("ClientId が設定されていません。");
 
-        if (string.IsNullOrWhiteSpace(_config.ClientSecret))
-            throw new InvalidOperationException("ClientSecret が設定されていません。");
+        // 証明書認証またはクライアントシークレット認証のいずれかが必要
+        bool hasCertificate = !string.IsNullOrWhiteSpace(_config.CertificatePath);
+        bool hasClientSecret = !string.IsNullOrWhiteSpace(_config.ClientSecret);
+
+        if (!hasCertificate && !hasClientSecret)
+            throw new InvalidOperationException(
+                "CertificatePath または ClientSecret のいずれかを設定してください。");
+
+        if (hasCertificate && !System.IO.File.Exists(_config.CertificatePath))
+            throw new InvalidOperationException(
+                $"証明書ファイルが見つかりません: {_config.CertificatePath}");
 
         if (string.IsNullOrWhiteSpace(_config.FolderPath))
             throw new InvalidOperationException("FolderPath が設定されていません。");
@@ -45,14 +55,59 @@ public class SharePointUploadService
     /// </summary>
     private GraphServiceClient CreateGraphClient()
     {
-        var credential = new ClientSecretCredential(
-            _config.TenantId,
-            _config.ClientId,
-            _config.ClientSecret);
-
         var scopes = new[] { "https://graph.microsoft.com/.default" };
 
-        return new GraphServiceClient(credential, scopes);
+        // 証明書認証を優先
+        if (!string.IsNullOrWhiteSpace(_config.CertificatePath))
+        {
+            Console.WriteLine("認証方法: クライアント証明書");
+            Console.WriteLine($"証明書パス: {_config.CertificatePath}");
+
+            // 証明書をロード
+            var certificate = LoadCertificate(_config.CertificatePath, _config.CertificatePassword);
+
+            var credential = new ClientCertificateCredential(
+                _config.TenantId,
+                _config.ClientId,
+                certificate);
+
+            return new GraphServiceClient(credential, scopes);
+        }
+        else
+        {
+            Console.WriteLine("認証方法: クライアントシークレット");
+
+            var credential = new ClientSecretCredential(
+                _config.TenantId,
+                _config.ClientId,
+                _config.ClientSecret);
+
+            return new GraphServiceClient(credential, scopes);
+        }
+    }
+
+    /// <summary>
+    /// 証明書ファイルをロード
+    /// </summary>
+    private X509Certificate2 LoadCertificate(string certificatePath, string? password)
+    {
+        try
+        {
+            // パスワードがある場合とない場合で処理を分ける
+            if (!string.IsNullOrWhiteSpace(password))
+            {
+                return new X509Certificate2(certificatePath, password);
+            }
+            else
+            {
+                return new X509Certificate2(certificatePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"証明書のロードに失敗しました: {certificatePath}", ex);
+        }
     }
 
     /// <summary>

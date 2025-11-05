@@ -5,6 +5,14 @@
     "FolderPath": "Shared Documents/UploadFolder",
     "TenantId": "your-tenant-id",
     "ClientId": "your-client-id",
+
+    "_comment_auth": "認証方法: 以下のいずれかを設定してください",
+
+    "_comment_cert": "証明書認証 (推奨): CertificatePath と CertificatePassword を設定",
+    "CertificatePath": "path/to/certificate.pfx",
+    "CertificatePassword": "certificate-password",
+
+    "_comment_secret": "クライアントシークレット認証: ClientSecret を設定 (証明書認証が優先されます)",
     "ClientSecret": "your-client-secret"
   }
 }

@@ -31,9 +31,19 @@ public class SharePointConfig
     public string ClientId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Azure AD クライアントシークレット
+    /// Azure AD クライアントシークレット (証明書認証を使用しない場合)
     /// </summary>
-    public string ClientSecret { get; set; } = string.Empty;
+    public string? ClientSecret { get; set; }
+
+    /// <summary>
+    /// クライアント証明書ファイルのパス (.pfx形式)
+    /// </summary>
+    public string? CertificatePath { get; set; }
+
+    /// <summary>
+    /// クライアント証明書のパスワード
+    /// </summary>
+    public string? CertificatePassword { get; set; }
 }
 
 /// <summary>

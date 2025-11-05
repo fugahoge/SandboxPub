@@ -23,6 +23,12 @@ bld/
 # Configuration files with secrets
 config.json
 
+# Certificate files
+*.pfx
+*.cer
+*.pem
+*.key
+
 # NuGet Packages
 *.nupkg
 *.snupkg
