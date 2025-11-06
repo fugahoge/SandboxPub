@@ -133,27 +133,46 @@ public class SharePointUploadService
             var siteInfo = ParseSiteUrl(_config.SiteUrl);
 
             // サイトIDを取得
-            var site = await _graphClient.Sites[siteInfo.hostName]
-                .GetAsync(requestConfig =>
-                {
-                    requestConfig.QueryParameters.Select = new[] { "id", "webUrl" };
-                });
+            Site? site = null;
 
-            if (site == null || string.IsNullOrEmpty(site.Id))
+            try
             {
                 // サイトパスが指定されている場合（例: /sites/sitename）
                 if (!string.IsNullOrEmpty(siteInfo.sitePath))
                 {
-                    site = await _graphClient.Sites
-                        .GetByPath(siteInfo.sitePath, siteInfo.hostName)
-                        .GetAsync();
+                    // サイトパスから先頭のスラッシュを除去
+                    var sitePath = siteInfo.sitePath.TrimStart('/');
+                    
+                    // サイト識別子を構築: hostname:/sites/sitename
+                    var siteIdentifier = $"{siteInfo.hostName}:/{sitePath}";
+                    
+                    // サブサイトを取得
+                    site = await _graphClient.Sites[siteIdentifier]
+                        .GetAsync(requestConfig =>
+                        {
+                            requestConfig.QueryParameters.Select = new[] { "id", "webUrl" };
+                        });
                 }
-
-                if (site == null || string.IsNullOrEmpty(site.Id))
+                else
                 {
-                    Console.WriteLine($"エラー: SharePointサイトが見つかりません: {_config.SiteUrl}");
-                    return false;
+                    // ルートサイトを取得
+                    site = await _graphClient.Sites[siteInfo.hostName]
+                        .GetAsync(requestConfig =>
+                        {
+                            requestConfig.QueryParameters.Select = new[] { "id", "webUrl" };
+                        });
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"エラー: SharePointサイトの取得に失敗しました: {ex.Message}");
+                return false;
+            }
+
+            if (site == null || string.IsNullOrEmpty(site.Id))
+            {
+                Console.WriteLine($"エラー: SharePointサイトが見つかりません: {_config.SiteUrl}");
+                return false;
             }
 
             Console.WriteLine($"  サイトID: {site.Id}");
@@ -213,11 +232,28 @@ public class SharePointUploadService
                 }
 
                 // 大容量ファイルのアップロード（チャンク単位）
-                var maxChunkSize = 320 * 1024 * 10; // 3.2MB
-                var provider = new ChunkedUploadProvider(uploadSession, _graphClient, fileStream, maxChunkSize);
-                var uploadResult = await provider.UploadAsync();
+                var maxChunkSize = 320 * 1024; // 320KB（推奨チャンクサイズ）
+                var uploadTask = new LargeFileUploadTask<DriveItem>(uploadSession, fileStream, maxChunkSize);
+                
+                // アップロードの進行状況を表示
+                IProgress<long> progress = new Progress<long>(uploadedBytes =>
+                {
+                    var progressPercent = (double)uploadedBytes / fileSize * 100;
+                    Console.Write($"\r  アップロード進捗: {progressPercent:F1}% ({FormatFileSize(uploadedBytes)} / {FormatFileSize(fileSize)})");
+                });
+                
+                var uploadResult = await uploadTask.UploadAsync(progress);
+                Console.WriteLine(); // 改行
 
-                uploadedItem = uploadResult.ItemResponse;
+                if (uploadResult.UploadSucceeded)
+                {
+                    uploadedItem = uploadResult.ItemResponse;
+                }
+                else
+                {
+                    Console.WriteLine("エラー: 大容量ファイルのアップロードに失敗しました");
+                    return false;
+                }
             }
 
             if (uploadedItem != null)
